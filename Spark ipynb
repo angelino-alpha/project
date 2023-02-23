@@ -1,0 +1,169 @@
+from pyspark.sql import SparkSession
+
+from pyspark.sql import functions as F
+
+from pyspark.sql.window import Window
+
+spark = SparkSession.builder.getOrCreate()
+
+df_units = spark.read.csv("s3://Data/Units_use.csv", sep=',', inferSchema=True, header=True)
+
+df_pp = spark.read.csv("s3://Data/Primary_Person_use.csv", sep=',', inferSchema=True, header=True)
+
+join_cond = [df_units.crash_join == df_pp.CRASH_ID, df_units.unit_join == df_pp.UNIT_NBR]
+
+def first_case(df_units, df_pp):
+
+    df_units = df_units.select("DEATH_CNT", "CRASH_ID", "UNIT_NBR")
+
+    df_units = df_units.filter(df_units.DEATH_CNT > 0) \
+
+                       .withColumnRenamed("CRASH_ID", "crash_join") \
+
+                       .withColumnRenamed("UNIT_NBR", "unit_join")
+
+    df_pp = df_pp.select("PRSN_GNDR_ID", "CRASH_ID", "UNIT_NBR") \
+
+                 .filter(df_pp["PRSN_GNDR_ID"] == 'MALE')
+
+    result_df = df_units.join(df_pp, on = join_cond, how = 'inner')
+
+    result_df = result_df.filter(F.col("PRSN_GNDR_ID").isNotNull())
+
+    val = result_df.select('crash_join').distinct().count() 
+
+    return val
+
+def second_case(df):
+
+    df = df.select('VEH_BODY_STYL_ID', 'VIN').filter((df["VEH_BODY_STYL_ID"] == "MOTORCYCLE") | (df["VEH_BODY_STYL_ID"] == "POLICE MOTORCYCLE"))
+
+    w = Window.partitionBy("VIN").orderBy(F.col("VEH_BODY_STYL_ID"))
+
+    df = df.withColumn("row", F.row_number().over(w)) \
+
+                        .filter(F.col("row") == 1).drop("row")
+
+    return df.count()
+
+def third_case(df):
+
+    df = df.select('PRSN_GNDR_ID', 'DRVR_LIC_STATE_ID', 'CRASH_ID').filter(df["PRSN_GNDR_ID"] == "FEMALE")
+
+    w = Window.partitionBy("DRVR_LIC_STATE_ID").orderBy(F.col("PRSN_GNDR_ID"))
+
+    df = df.withColumn("row", F.row_number().over(w))
+
+    val = df.agg({"row": "max"}).collect()[0][0]
+
+    df = df.filter(df["row"] == val)
+
+    state = df.agg({"DRVR_LIC_STATE_ID": "max"}).collect()[0][0]
+
+    return state
+
+def forth_case(df):
+
+    df = df_units.select("VEH_MAKE_ID", "TOT_INJRY_CNT", "DEATH_CNT")
+
+    df = df.withColumn('total', F.expr("TOT_INJRY_CNT + DEATH_CNT"))
+
+    w = Window.partitionBy("VEH_MAKE_ID")
+
+    df = df.withColumn('Sum', F.sum('total').over(w))
+
+    op = df.select('Sum', "VEH_MAKE_ID").distinct()
+
+    op = op.withColumn("tmp", F.lit("tmp"))
+
+    w1 = Window.partitionBy("tmp").orderBy(F.col("Sum").desc())
+
+    op= op.withColumn("rank", F.dense_rank().over(w1))
+
+    op = op.filter(op["rank"] < 16).drop("tmp") \
+
+           .filter(op["rank"] > 4)
+
+    return op
+
+def fifth_case(df_units, df_pp):
+
+    df_units = df_units.select("VEH_BODY_STYL_ID", "CRASH_ID", "UNIT_NBR")
+
+    df_units = df_units.filter(~df_units.VEH_BODY_STYL_ID.contains('OTHER')) \
+
+                       .filter(~df_units.VEH_BODY_STYL_ID.contains('UNKNOWN')) \
+
+                       .filter(~df_units.VEH_BODY_STYL_ID.contains('NOT REPORTED')) \
+
+                       .filter(~df_units.VEH_BODY_STYL_ID.contains('NA')) \
+
+                       .withColumnRenamed("CRASH_ID", "crash_join") \
+
+                       .withColumnRenamed("UNIT_NBR", "unit_join")
+
+    df_pp = df_pp.select("PRSN_ETHNICITY_ID", "CRASH_ID", "UNIT_NBR") \
+
+                 .filter(~df_pp.PRSN_ETHNICITY_ID.contains('OTHER')) \
+
+                 .filter(~df_pp.PRSN_ETHNICITY_ID.contains('UNKNOWN')) \
+
+                 .filter(~df_pp.PRSN_ETHNICITY_ID.contains('NOT REPORTED')) \
+
+                 .filter(~df_pp.PRSN_ETHNICITY_ID.contains('NA'))
+
+    result_df = df_units.join(df_pp, on = join_cond, how = 'left')
+
+    result_df = result_df.filter(~result_df.PRSN_ETHNICITY_ID.contains('null')) \
+
+                         .filter(F.col("PRSN_ETHNICITY_ID").isNotNull())
+
+    w = Window.partitionBy("VEH_BODY_STYL_ID", "PRSN_ETHNICITY_ID").orderBy(F.col("UNIT_NBR"))
+
+    result_df = result_df.withColumn("row", F.row_number().over(w)).drop("crash_join", "unit_join")
+
+    w2 = Window.partitionBy("VEH_BODY_STYL_ID")
+
+    result_df = result_df.withColumn('max', F.max('row').over(w2))
+
+    result_df = result_df.filter(F.col('row') == F.col('max')).drop("CRASH_ID", "UNIT_NBR", "row")
+
+    return result_df
+
+def sixth_case(df):
+
+    df = df.select('DRVR_ZIP', 'PRSN_ALC_RSLT_ID', 'CRASH_ID').filter(df["PRSN_ALC_RSLT_ID"] == "Positive")
+
+    df = df.filter(F.col("DRVR_ZIP").isNotNull())
+
+    w = Window.partitionBy("DRVR_ZIP").orderBy(F.col("PRSN_ALC_RSLT_ID"))
+
+    df = df.withColumn("row", F.row_number().over(w))
+
+    df = df.withColumn('max', F.max('row').over(w))
+
+    df = df.filter(F.col('row') == F.col('max')) \
+
+               .drop('max')
+
+    df = df.withColumn("tmp", F.lit("tmp"))
+
+    w1 = Window.partitionBy("tmp").orderBy(F.col("row").desc())
+
+    df = df.withColumn("rank", F.dense_rank().over(w1))
+
+    df = df.filter(df["rank"] < 6).drop("PRSN_ALC_RSLT_ID", "CRASH_ID", "row", "tmp")
+
+    return df
+
+val_first = first_case(df_units, df_pp)
+
+val_second = second_case(df_units)
+
+val_third = third_case(df_pp)
+
+df_forth = forth_case(df_units)
+
+df_fifth = fifth_case(df_units, df_pp)
+
+df_sixth = sixth_case(df_pp)
